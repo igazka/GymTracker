@@ -1067,6 +1067,9 @@ static void execute_shortcut(int action_idx) {
       }
       dictation_session_start(s_app.state.new_ex_dictation_session);
       break;
+    case 8: 
+      add_extra_set(); 
+      break;
   }
 }
 
@@ -1289,7 +1292,7 @@ static void settings_draw_row_callback(GContext *ctx, const Layer *cell_layer,
       }
     }
   } else if (cell_index->section == 4) {
-    static const char *actions[] = {"Variations","View Note","Swap (Later)","Skip Entirely","Finish Set","Skip Set","Voice Note", "Add Ex. (Voice)"};
+    static const char *actions[] = {"Variations","View Note","Swap (Later)","Skip Entirely","Finish Set","Skip Set","Voice Note", "Add Ex. (Voice)", "Add Set"};
     switch (cell_index->row) {
       case 0: snprintf(title, sizeof(title), "Up Long Press");     snprintf(subtitle, sizeof(subtitle), "%s", actions[s_app.settings.shortcut_up]);     break;
       case 1: snprintf(title, sizeof(title), "Down Long Press");   snprintf(subtitle, sizeof(subtitle), "%s", actions[s_app.settings.shortcut_down]);   break;
@@ -1375,9 +1378,9 @@ static void settings_select_callback(MenuLayer *ml, MenuIndex *cell_index, void 
     }
   } else if (cell_index->section == 4) {
     switch (cell_index->row) {
-      case 0: s_app.settings.shortcut_up++;     if (s_app.settings.shortcut_up     > 7) s_app.settings.shortcut_up     = 0; save_setting(SK_SHORTCUT_UP,   s_app.settings.shortcut_up);     break;
-      case 1: s_app.settings.shortcut_down++;   if (s_app.settings.shortcut_down   > 7) s_app.settings.shortcut_down   = 0; save_setting(SK_SHORTCUT_DOWN, s_app.settings.shortcut_down);   break;
-      case 2: s_app.settings.shortcut_select++; if (s_app.settings.shortcut_select > 7) s_app.settings.shortcut_select = 0; save_setting(SK_SHORTCUT_SEL,  s_app.settings.shortcut_select); break;
+      case 0: s_app.settings.shortcut_up++;     if (s_app.settings.shortcut_up     > 8) s_app.settings.shortcut_up     = 0; save_setting(SK_SHORTCUT_UP,   s_app.settings.shortcut_up);     break;
+      case 1: s_app.settings.shortcut_down++;   if (s_app.settings.shortcut_down   > 8) s_app.settings.shortcut_down   = 0; save_setting(SK_SHORTCUT_DOWN, s_app.settings.shortcut_down);   break;
+      case 2: s_app.settings.shortcut_select++; if (s_app.settings.shortcut_select > 8) s_app.settings.shortcut_select = 0; save_setting(SK_SHORTCUT_SEL,  s_app.settings.shortcut_select); break;
     }
   }
   menu_layer_reload_data(s_app.ui.settings_menu_layer);
