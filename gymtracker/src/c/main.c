@@ -531,6 +531,8 @@ static void move_slot_int(int key_base, int from_slot, int to_slot) {
 // gates whether the target slot's value is treated as valid (false when the
 // target slot holds no routine).
 static void swap_slot_int(int key_base, int slot_a, int slot_b, bool b_may_exist) {
+  if (slot_a == slot_b) return; // CRITICAL FIX: Prevent self-deletion
+  
   bool has_a = persist_exists(key_base + slot_a);
   bool has_b = b_may_exist && persist_exists(key_base + slot_b);
   int  val_a = has_a ? persist_read_int(key_base + slot_a) : 0;
@@ -974,33 +976,35 @@ static void perform_skip_set(void) {
 // sets, so they grow by a pair to keep the parity intact.
 static void add_extra_set(void) {
   if (s_app.state.curr_ex_idx >= s_app.state.total_exercises) return;
-
-  int curr  = s_app.state.curr_ex_idx;
-  int first = curr, last = curr;
+  
+  int curr = s_app.state.curr_ex_idx;
+  int first = curr;
+  int last = curr;
   Exercise *ex = &s_app.state.exercises[curr];
 
-  if (ex->modifier == 7 && curr + 2 < s_app.state.total_exercises) {
-    first = curr;     last = curr + 2;
-  } else if (curr > 0 && s_app.state.exercises[curr - 1].modifier == 7 &&
-             curr + 1 < s_app.state.total_exercises) {
-    first = curr - 1; last = curr + 1;
-  } else if (curr >= 2 && s_app.state.exercises[curr - 2].modifier == 7) {
-    first = curr - 2; last = curr;
-  } else if (ex->modifier == 2 && curr + 1 < s_app.state.total_exercises) {
-    first = curr;     last = curr + 1;
-  } else if (curr > 0 && s_app.state.exercises[curr - 1].modifier == 2) {
-    first = curr - 1; last = curr;
-  }
-
-  int inc = (ex->modifier == 1) ? 2 : 1;
-
-  for (int i = first; i <= last; i++) {
-    if (s_app.state.exercises[i].target_sets + inc > 10) {
-      vibes_double_pulse();  // actual_reps/actual_weight hold at most 10 sets
-      return;
+  // Safely map Supersets and Giant Sets by finding the true Anchor
+  if (ex->modifier == 2 || ex->modifier == 7) {
+    // Scan backwards to find the first exercise in the linked group
+    while (first > 0 && (s_app.state.exercises[first - 1].modifier == 2 || s_app.state.exercises[first - 1].modifier == 7)) {
+      first--;
+    }
+    // Scan forwards to find the last exercise in the linked group
+    while (last < s_app.state.total_exercises - 1 && (s_app.state.exercises[last].modifier == 2 || s_app.state.exercises[last].modifier == 7)) {
+      last++;
     }
   }
 
+  int inc = (ex->modifier == 1) ? 2 : 1;
+  
+  // CRITICAL FIX: Use <= last to ensure EVERY exercise is bounds-checked!
+  for (int i = first; i <= last; i++) {
+    if (s_app.state.exercises[i].target_sets + inc > 10) {
+      vibes_double_pulse(); // Reject if any linked exercise would exceed 10 sets
+      return; 
+    }
+  }
+
+  // Safely apply the sets
   for (int i = first; i <= last; i++) {
     s_app.state.exercises[i].target_sets += inc;
     s_app.state.total_workout_sets += inc;
@@ -3927,7 +3931,8 @@ static void init(void) {
   // They will be created the first time they are pushed, just like all other windows.
 
   app_message_register_inbox_received(inbox_received_callback);
-  app_message_open(app_message_inbox_size_maximum(), app_message_outbox_size_maximum());
+  // 2048 is plenty of room for our 1300-byte routines, freeing up over 12 KB of RAM!
+  app_message_open(2048, 1024);
 }
 
 static void deinit(void) {
