@@ -133,6 +133,7 @@ typedef struct {
   int sensation;
   int adding_exercise_to_slot;
   int cached_completed_sets; // OPT #4: cached to avoid per-second loop
+  int completed_sets[MAX_EXERCISES]; // jump-safe per-exercise completion
   bool hr_supported;         // OPT #2: checked once at workout start
   bool is_24h;               // OPT #8: cached once at workout start
   DictationSession *dictation_session;
@@ -163,11 +164,11 @@ typedef struct {
 typedef struct {
   Window *main_window, *settings_window, *workout_window, *help_window, *confirm_window;
   Window *summary_window, *variation_window, *exit_window, *sensation_window;
-  Window *action_window, *inspector_window, *mega_window;
+  Window *action_window, *inspector_window, *mega_window, *jump_window;
   Window *confirm_add_window, *ex_action_window;
 
   MenuLayer *menu_layer, *settings_menu_layer, *variation_menu_layer;
-  MenuLayer *sensation_menu_layer, *inspector_menu_layer;
+  MenuLayer *sensation_menu_layer, *inspector_menu_layer, *jump_menu_layer;
   SimpleMenuLayer *action_menu_layer, *mega_menu_layer, *ex_action_menu_layer;
 
   Layer *main_header_bg, *settings_header_bg, *progress_layer, *workout_bg_layer;
@@ -203,7 +204,7 @@ typedef struct {
   SimpleMenuSection action_menu_sections[1];
   SimpleMenuItem action_menu_items[4];
   SimpleMenuSection mega_menu_sections[1];
-  SimpleMenuItem mega_menu_items[9];
+  SimpleMenuItem mega_menu_items[10];
   SimpleMenuSection ex_action_menu_sections[1];
   SimpleMenuItem ex_action_menu_items[3];
 } AppUI;
@@ -274,12 +275,15 @@ static void push_inspector_window(void);
 static void push_action_window(void);
 static void push_workout_window(void);
 static void push_mega_window(void);
+static void push_jump_window(void);
 
 static void set_rest_overlay_state(bool is_resting, bool animated);
 static void tick_handler(struct tm *tick_time, TimeUnits units_changed);
 static void update_workout_ui(bool animate_box);
 static void skip_rest(void);
 static void swap_exercise(void);
+static int  resolve_jump_anchor(int idx);
+static void jump_to_exercise(int target_idx);
 static void perform_true_skip(void);
 static void perform_finish_set(void);
 static void perform_skip_set(void);
@@ -322,6 +326,8 @@ static void action_window_load(Window *window);
 static void action_window_unload(Window *window);
 static void mega_window_load(Window *window);
 static void mega_window_unload(Window *window);
+static void jump_window_load(Window *window);
+static void jump_window_unload(Window *window);
 static void workout_window_load(Window *window);
 static void workout_window_unload(Window *window);
 static void wo_click_provider(void *context);
@@ -600,53 +606,10 @@ static void save_routine_to_slot(int slot_idx) {
 // ========================================================================= //
 static int get_completed_sets(void) {
   int completed = 0;
-  // Determine whether the current exercise is part of a giant set (modifier 7)
-  // and, if so, the anchor index of that trio.
-  int giant_anchor = -1;
-  if (s_app.state.curr_ex_idx < s_app.state.total_exercises &&
-      s_app.state.exercises[s_app.state.curr_ex_idx].modifier == 7 &&
-      s_app.state.curr_ex_idx + 2 < s_app.state.total_exercises) {
-    giant_anchor = s_app.state.curr_ex_idx;
-  } else if (s_app.state.curr_ex_idx >= 1 &&
-             s_app.state.curr_ex_idx - 1 < s_app.state.total_exercises &&
-             s_app.state.exercises[s_app.state.curr_ex_idx - 1].modifier == 7 &&
-             s_app.state.curr_ex_idx + 1 < s_app.state.total_exercises) {
-    giant_anchor = s_app.state.curr_ex_idx - 1;
-  } else if (s_app.state.curr_ex_idx >= 2 &&
-             s_app.state.curr_ex_idx - 2 < s_app.state.total_exercises &&
-             s_app.state.exercises[s_app.state.curr_ex_idx - 2].modifier == 7) {
-    giant_anchor = s_app.state.curr_ex_idx - 2;
-  }
-
-  for (int i = 0; i < s_app.state.total_exercises; i++) {
-    bool in_giant = (giant_anchor >= 0 && i >= giant_anchor && i < giant_anchor + 3);
-    if (i < s_app.state.curr_ex_idx) {
-      // Past exercise. For a superset's first half OR any past giant-set
-      // member, current_set holds the count of finished sets (because the
-      // increment happens at the lap end, when we move on to the next set
-      // on every member). Use it directly.
-      if (in_giant) {
-        completed += s_app.state.exercises[i].current_set;
-      } else if (s_app.state.exercises[i].modifier == 2 && i == s_app.state.curr_ex_idx - 1) {
-        completed += s_app.state.exercises[i].current_set;
-      } else {
-        completed += s_app.state.exercises[i].target_sets;
-      }
-    } else if (i == s_app.state.curr_ex_idx) {
-      // Current exercise: user is on set current_set (0..N-1 already done).
-      completed += (s_app.state.exercises[i].current_set - 1);
-    } else {
-      // Future exercise. For giant-set members that are still in the same
-      // trio, or a superset's second half, current_set holds the same
-      // "set number we're on" — the user has done current_set - 1 of them.
-      if (in_giant) {
-        completed += (s_app.state.exercises[i].current_set - 1);
-      } else if (i == s_app.state.curr_ex_idx + 1 &&
-                 s_app.state.exercises[s_app.state.curr_ex_idx].modifier == 2) {
-        completed += (s_app.state.exercises[i].current_set - 1);
-      }
-    }
-  }
+  for (int i = 0; i < s_app.state.total_exercises; i++)
+    completed += s_app.state.completed_sets[i];
+  if (completed > s_app.state.total_workout_sets)
+    completed = s_app.state.total_workout_sets;
   return completed;
 }
 
@@ -745,6 +708,40 @@ static void swap_exercise(void) {
   update_workout_ui(true);
 }
 
+// Resolve a target exercise index to the anchor (first member) of any linked
+// superset (modifier 2) or giant set (modifier 7). Jumping into the middle of
+// a linked group would break the engine's is_first_half / is_second_half /
+// giant_pos invariants, so we always land on the group's first exercise.
+static int resolve_jump_anchor(int idx) {
+  if (idx > 0 && s_app.state.exercises[idx - 1].modifier == 2) return idx - 1;
+  if (idx > 0 && s_app.state.exercises[idx - 1].modifier == 7) return idx - 1;
+  if (idx > 1 && s_app.state.exercises[idx - 2].modifier == 7) return idx - 2;
+  return idx;
+}
+
+// Jump the workout cursor to any exercise (pure reposition). No exercise data
+// is mutated: current_set is preserved so a half-done exercise resumes where it
+// left off. Progress is driven by the per-exercise completed_sets[] tracker, so
+// moving the cursor never distorts the progress bar.
+static void jump_to_exercise(int target_idx) {
+  if (s_app.state.is_resting) return;
+  if (target_idx < 0 || target_idx >= s_app.state.total_exercises) return;
+
+  target_idx = resolve_jump_anchor(target_idx);
+  if (target_idx == s_app.state.curr_ex_idx) return;
+
+  s_app.state.curr_ex_idx = target_idx;
+
+  init_temp_values(&s_app.state.exercises[target_idx]);
+  s_app.state.is_resting = false;
+  layer_set_hidden(s_app.ui.rest_overlay_layer, true);
+  s_app.state.edit_mode = (s_app.state.exercises[target_idx].target_weight == 0)
+                            ? 0 : s_app.settings.swap_reps_weight;
+  s_app.state.cached_completed_sets = get_completed_sets();
+  if (s_app.ui.progress_layer) layer_mark_dirty(s_app.ui.progress_layer);
+  update_workout_ui(true);
+}
+
 static void perform_true_skip(void) {
   if (s_app.state.curr_ex_idx >= s_app.state.total_exercises) return;
 
@@ -774,6 +771,7 @@ static void perform_true_skip(void) {
         member->actual_reps[j] = 0; member->actual_weight[j] = 0;
       }
       member->current_set = member->target_sets;
+      s_app.state.completed_sets[i] = member->target_sets;
     }
     s_app.state.curr_ex_idx = giant_anchor + 3;
     if (s_app.state.curr_ex_idx < s_app.state.total_exercises) {
@@ -797,6 +795,7 @@ static void perform_true_skip(void) {
     ex->actual_reps[i] = 0; ex->actual_weight[i] = 0;
   }
   ex->current_set = ex->target_sets;
+  s_app.state.completed_sets[s_app.state.curr_ex_idx] = ex->target_sets;
 
   if (is_first_half) {
     Exercise *next_ex = &s_app.state.exercises[s_app.state.curr_ex_idx + 1];
@@ -804,6 +803,7 @@ static void perform_true_skip(void) {
       next_ex->actual_reps[i] = 0; next_ex->actual_weight[i] = 0;
     }
     next_ex->current_set = next_ex->target_sets;
+    s_app.state.completed_sets[s_app.state.curr_ex_idx + 1] = next_ex->target_sets;
     s_app.state.curr_ex_idx++;
   } else if (is_second_half) {
     Exercise *prev_ex = &s_app.state.exercises[s_app.state.curr_ex_idx - 1];
@@ -811,6 +811,7 @@ static void perform_true_skip(void) {
       prev_ex->actual_reps[i] = 0; prev_ex->actual_weight[i] = 0;
     }
     prev_ex->current_set = prev_ex->target_sets;
+    s_app.state.completed_sets[s_app.state.curr_ex_idx - 1] = prev_ex->target_sets;
   }
 
   if (s_app.state.curr_ex_idx + 1 < s_app.state.total_exercises) {
@@ -838,6 +839,10 @@ static void perform_finish_set(void) {
   Exercise *ex = &s_app.state.exercises[s_app.state.curr_ex_idx];
   ex->actual_reps[ex->current_set - 1]   = s_app.state.temp_reps;
   ex->actual_weight[ex->current_set - 1] = s_app.state.temp_weight;
+
+  // Jump-safe progress: this set is now recorded for the current exercise.
+  if (s_app.state.completed_sets[s_app.state.curr_ex_idx] < ex->target_sets)
+    s_app.state.completed_sets[s_app.state.curr_ex_idx]++;
 
   bool is_first_half  = (ex->modifier == 2 && s_app.state.curr_ex_idx + 1 < s_app.state.total_exercises);
   bool is_second_half = (s_app.state.curr_ex_idx > 0 &&
@@ -1074,6 +1079,9 @@ static void execute_shortcut(int action_idx) {
     case 8: 
       add_extra_set(); 
       break;
+    case 9:
+      push_jump_window();
+      break;
   }
 }
 
@@ -1296,7 +1304,7 @@ static void settings_draw_row_callback(GContext *ctx, const Layer *cell_layer,
       }
     }
   } else if (cell_index->section == 4) {
-    static const char *actions[] = {"Variations","View Note","Swap (Later)","Skip Entirely","Finish Set","Skip Set","Voice Note", "Add Ex. (Voice)", "Add Set"};
+    static const char *actions[] = {"Variations","View Note","Swap (Later)","Skip Entirely","Finish Set","Skip Set","Voice Note", "Add Ex. (Voice)", "Add Set", "Jump (Go To)"};
     switch (cell_index->row) {
       case 0: snprintf(title, sizeof(title), "Up Long Press");     snprintf(subtitle, sizeof(subtitle), "%s", actions[s_app.settings.shortcut_up]);     break;
       case 1: snprintf(title, sizeof(title), "Down Long Press");   snprintf(subtitle, sizeof(subtitle), "%s", actions[s_app.settings.shortcut_down]);   break;
@@ -1382,9 +1390,9 @@ static void settings_select_callback(MenuLayer *ml, MenuIndex *cell_index, void 
     }
   } else if (cell_index->section == 4) {
     switch (cell_index->row) {
-      case 0: s_app.settings.shortcut_up++;     if (s_app.settings.shortcut_up     > 8) s_app.settings.shortcut_up     = 0; save_setting(SK_SHORTCUT_UP,   s_app.settings.shortcut_up);     break;
-      case 1: s_app.settings.shortcut_down++;   if (s_app.settings.shortcut_down   > 8) s_app.settings.shortcut_down   = 0; save_setting(SK_SHORTCUT_DOWN, s_app.settings.shortcut_down);   break;
-      case 2: s_app.settings.shortcut_select++; if (s_app.settings.shortcut_select > 8) s_app.settings.shortcut_select = 0; save_setting(SK_SHORTCUT_SEL,  s_app.settings.shortcut_select); break;
+      case 0: s_app.settings.shortcut_up++;     if (s_app.settings.shortcut_up     > 9) s_app.settings.shortcut_up     = 0; save_setting(SK_SHORTCUT_UP,   s_app.settings.shortcut_up);     break;
+      case 1: s_app.settings.shortcut_down++;   if (s_app.settings.shortcut_down   > 9) s_app.settings.shortcut_down   = 0; save_setting(SK_SHORTCUT_DOWN, s_app.settings.shortcut_down);   break;
+      case 2: s_app.settings.shortcut_select++; if (s_app.settings.shortcut_select > 9) s_app.settings.shortcut_select = 0; save_setting(SK_SHORTCUT_SEL,  s_app.settings.shortcut_select); break;
     }
   }
   menu_layer_reload_data(s_app.ui.settings_menu_layer);
@@ -2421,6 +2429,62 @@ static void push_inspector_window(void) {
   window_stack_push(s_app.ui.inspector_window, true);
 }
 
+// ----------- Jump to Exercise Window -----------
+static uint16_t jump_get_num_rows_callback(MenuLayer *ml, uint16_t section, void *data) {
+  return (uint16_t)s_app.state.total_exercises;
+}
+
+static void jump_draw_row_callback(GContext *ctx, const Layer *cell_layer,
+                                   MenuIndex *cell_index, void *data) {
+  int idx = cell_index->row;
+  Exercise *ex = &s_app.state.exercises[idx];
+  int done = s_app.state.completed_sets[idx];
+  if (done > ex->target_sets) done = ex->target_sets;
+
+  char subtitle[32];
+  if (idx == s_app.state.curr_ex_idx)
+    snprintf(subtitle, sizeof(subtitle), "Current - %d/%d done", done, ex->target_sets);
+  else
+    snprintf(subtitle, sizeof(subtitle), "%d/%d sets done", done, ex->target_sets);
+  menu_cell_basic_draw(ctx, cell_layer, ex->name, subtitle, NULL);
+}
+
+static void jump_select_callback(MenuLayer *ml, MenuIndex *cell_index, void *data) {
+  int target_idx = cell_index->row;
+  window_stack_remove(s_app.ui.jump_window, false);
+  jump_to_exercise(target_idx);
+}
+
+static void jump_window_load(Window *window) {
+  Layer *w_layer = window_get_root_layer(window);
+  GRect bounds   = layer_get_bounds(w_layer);
+  s_app.ui.jump_menu_layer = menu_layer_create(bounds);
+  menu_layer_set_callbacks(s_app.ui.jump_menu_layer, NULL, (MenuLayerCallbacks){
+    .get_num_rows = jump_get_num_rows_callback,
+    .draw_row     = jump_draw_row_callback,
+    .select_click = jump_select_callback,
+  });
+  menu_layer_set_normal_colors(s_app.ui.jump_menu_layer,    get_bg_color(), get_text_color());
+  menu_layer_set_highlight_colors(s_app.ui.jump_menu_layer, get_theme_color(), get_bg_color());
+  menu_layer_set_click_config_onto_window(s_app.ui.jump_menu_layer, window);
+  layer_add_child(w_layer, menu_layer_get_layer(s_app.ui.jump_menu_layer));
+}
+
+static void jump_window_unload(Window *window) {
+  menu_layer_destroy(s_app.ui.jump_menu_layer);
+  s_app.ui.jump_menu_layer = NULL; // FIX: Prevent dangling pointer
+}
+
+static void push_jump_window(void) {
+  if (!s_app.ui.jump_window) {
+    s_app.ui.jump_window = window_create();
+    window_set_window_handlers(s_app.ui.jump_window,
+      (WindowHandlers){ .load = jump_window_load, .unload = jump_window_unload });
+  }
+  window_set_background_color(s_app.ui.jump_window, get_bg_color());
+  window_stack_push(s_app.ui.jump_window, true);
+}
+
 // ----------- Action Window -----------
 static void action_start_callback(int index, void *ctx) {
   window_stack_remove(s_app.ui.action_window, false);
@@ -2484,6 +2548,7 @@ static void menu_skip_callback(int index, void *ctx)      { window_stack_remove(
 static void menu_finish_callback(int index, void *ctx)    { window_stack_remove(s_app.ui.mega_window, false); perform_finish_set(); }
 static void menu_skip_set_callback(int index, void *ctx)  { window_stack_remove(s_app.ui.mega_window, false); perform_skip_set(); }
 static void menu_voice_callback(int index, void *ctx)     { window_stack_remove(s_app.ui.mega_window, false); perform_voice_note(); }
+static void menu_jump_callback(int index, void *ctx)      { window_stack_remove(s_app.ui.mega_window, false); push_jump_window(); }
 static void mega_window_load(Window *window) {
   int n = 0;
   s_app.ui.mega_menu_items[n++] = (SimpleMenuItem){ .title = "Finish Set",             .subtitle = "Log & progress workout",    .callback = menu_finish_callback };
@@ -2497,6 +2562,7 @@ static void mega_window_load(Window *window) {
   s_app.ui.mega_menu_items[n++] = (SimpleMenuItem){ .title = "Record Voice Note",       .subtitle = "Dictate note for this exercise", .callback = menu_voice_callback };
   s_app.ui.mega_menu_items[n++] = (SimpleMenuItem){ .title = "Variations",              .subtitle = "Add a variation",               .callback = menu_var_callback };
   s_app.ui.mega_menu_items[n++] = (SimpleMenuItem){ .title = "Do Later (Swap)",         .subtitle = "Swap with next exercise",        .callback = menu_swap_callback };
+  s_app.ui.mega_menu_items[n++] = (SimpleMenuItem){ .title = "Jump to Exercise",        .subtitle = "Go to any exercise in routine",  .callback = menu_jump_callback };
   s_app.ui.mega_menu_items[n++] = (SimpleMenuItem){ .title = "Skip Set (Log 0)",        .subtitle = "Progress to next set",           .callback = menu_skip_set_callback };
   s_app.ui.mega_menu_items[n++] = (SimpleMenuItem){ .title = "Skip Exercise (Log 0)",   .subtitle = "Progress to next exercise",      .callback = menu_skip_callback };
   s_app.ui.mega_menu_items[n++] = (SimpleMenuItem){ .title = "Add Ex. (Voice)", .subtitle = "Append to routine", .callback = menu_quick_add_callback };
@@ -3558,6 +3624,7 @@ static void start_workout_from_slot(int slot_idx) {
   for (int j = 0; j < s_app.state.total_exercises; j++) {
     persist_read_data(ROUTINE_EX_BASE + (slot_idx * MAX_EXERCISES) + j, &s_app.state.exercises[j], sizeof(Exercise));
     s_app.state.exercises[j].current_set = 1;
+    s_app.state.completed_sets[j] = 0;
     s_app.state.total_workout_sets += s_app.state.exercises[j].target_sets;
     
     for(int s = 0; s < 10; s++) {
@@ -3607,6 +3674,18 @@ static void menu_select_callback(MenuLayer *ml, MenuIndex *cell_index, void *dat
 
       for (int j = 0; j < s_app.state.total_exercises; j++)
         persist_read_data(ACTIVE_EX_BASE + j, &s_app.state.exercises[j], sizeof(Exercise));
+
+      // v1 resume: rebuild the jump-safe completion tracker using the same
+      // watermark estimate the old get_completed_sets() relied on. Live play
+      // then maintains it exactly.
+      for (int j = 0; j < s_app.state.total_exercises; j++) {
+        if (j < s_app.state.curr_ex_idx)
+          s_app.state.completed_sets[j] = s_app.state.exercises[j].target_sets;
+        else if (j == s_app.state.curr_ex_idx)
+          s_app.state.completed_sets[j] = s_app.state.exercises[j].current_set - 1;
+        else
+          s_app.state.completed_sets[j] = 0;
+      }
 
       s_app.state.active     = true;
       s_app.state.has_resume = false;
