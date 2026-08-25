@@ -339,6 +339,7 @@ static void menu_draw_row_callback(GContext *ctx, const Layer *cell_layer, MenuI
 static void menu_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, void *data);
 static void inbox_received_callback(DictionaryIterator *iterator, void *context);
 static int  get_completed_sets(void);
+static int  find_next_incomplete(void);
 static void refresh_directory(void);
 static void save_routine_to_slot(int slot_idx);
 
@@ -613,6 +614,29 @@ static int get_completed_sets(void) {
   return completed;
 }
 
+// Returns the index of the first exercise that hasn't completed all of its
+// target sets, or -1 if the whole routine is complete. Used to advance the
+// cursor so forward jumps don't silently skip exercises: the earliest
+// unfinished exercise is always picked up before the routine ends.
+static int find_next_incomplete(void) {
+  for (int i = 0; i < s_app.state.total_exercises; i++) {
+    if (s_app.state.completed_sets[i] < s_app.state.exercises[i].target_sets)
+      return i;
+  }
+  return -1;
+}
+
+// Like find_next_incomplete(), but skips one index. Used only for the "NEXT"
+// preview, where the current exercise has not yet been marked complete.
+static int find_next_incomplete_skip(int skip_idx) {
+  for (int i = 0; i < s_app.state.total_exercises; i++) {
+    if (i == skip_idx) continue;
+    if (s_app.state.completed_sets[i] < s_app.state.exercises[i].target_sets)
+      return i;
+  }
+  return -1;
+}
+
 static void init_temp_values(Exercise *ex) {
   s_app.state.is_timed_active = false;
   
@@ -773,8 +797,9 @@ static void perform_true_skip(void) {
       member->current_set = member->target_sets;
       s_app.state.completed_sets[i] = member->target_sets;
     }
-    s_app.state.curr_ex_idx = giant_anchor + 3;
-    if (s_app.state.curr_ex_idx < s_app.state.total_exercises) {
+    int next = find_next_incomplete();
+    if (next != -1) {
+      s_app.state.curr_ex_idx = next;
       init_temp_values(&s_app.state.exercises[s_app.state.curr_ex_idx]);
       s_app.state.cached_completed_sets = get_completed_sets();
       s_app.state.is_resting = false;
@@ -814,8 +839,9 @@ static void perform_true_skip(void) {
     s_app.state.completed_sets[s_app.state.curr_ex_idx - 1] = prev_ex->target_sets;
   }
 
-  if (s_app.state.curr_ex_idx + 1 < s_app.state.total_exercises) {
-    s_app.state.curr_ex_idx++;
+  int next = find_next_incomplete();
+  if (next != -1) {
+    s_app.state.curr_ex_idx = next;
     init_temp_values(&s_app.state.exercises[s_app.state.curr_ex_idx]);
     s_app.state.cached_completed_sets = get_completed_sets();
     s_app.state.is_resting = false;
@@ -877,8 +903,9 @@ static void perform_finish_set(void) {
       int anchor_target  = s_app.state.exercises[giant_anchor].target_sets;
       if (anchor_current >= anchor_target) {
         // Final lap complete: advance past the trio and use the inter-exercise rest vibe.
-        s_app.state.curr_ex_idx = giant_anchor + 3;
-        if (s_app.state.curr_ex_idx < s_app.state.total_exercises) {
+        int next = find_next_incomplete();
+        if (next != -1) {
+          s_app.state.curr_ex_idx = next;
           s_app.state.exercises[s_app.state.curr_ex_idx].current_set = 1;
           s_app.state.rest_seconds_remaining = s_app.settings.ex_rest_sec;
           play_vibe(s_app.settings.ex_vibe);
@@ -919,8 +946,9 @@ static void perform_finish_set(void) {
       s_app.state.rest_seconds_remaining = s_app.settings.set_rest_sec;
       play_vibe(s_app.settings.set_vibe);
     } else {
-      s_app.state.curr_ex_idx++;
-      if (s_app.state.curr_ex_idx < s_app.state.total_exercises) {
+      int next = find_next_incomplete();
+      if (next != -1) {
+        s_app.state.curr_ex_idx = next;
         s_app.state.exercises[s_app.state.curr_ex_idx].current_set = 1;
         s_app.state.rest_seconds_remaining = s_app.settings.ex_rest_sec;
         play_vibe(s_app.settings.ex_vibe);
@@ -940,8 +968,9 @@ static void perform_finish_set(void) {
       else                                                        s_app.state.rest_seconds_remaining = s_app.settings.set_rest_sec;
       play_vibe(s_app.settings.set_vibe);
     } else {
-      s_app.state.curr_ex_idx++;
-      if (s_app.state.curr_ex_idx < s_app.state.total_exercises) {
+      int next = find_next_incomplete();
+      if (next != -1) {
+        s_app.state.curr_ex_idx = next;
         s_app.state.exercises[s_app.state.curr_ex_idx].current_set = 1;
         s_app.state.rest_seconds_remaining = s_app.settings.ex_rest_sec;
         play_vibe(s_app.settings.ex_vibe);
@@ -3094,6 +3123,7 @@ static void update_workout_ui(bool animate_box) {
   text_layer_set_text(s_app.ui.exercise_layer, ex->name);
 
   static char next_buf[64];
+  bool is_first_half  = (ex->modifier == 2 && s_app.state.curr_ex_idx + 1 < s_app.state.total_exercises);
   bool is_second_half = (s_app.state.curr_ex_idx > 0 &&
                          s_app.state.exercises[s_app.state.curr_ex_idx - 1].modifier == 2);
 
@@ -3119,21 +3149,29 @@ static void update_workout_ui(bool animate_box) {
     bool is_last_set = (giant_pos == 2) && (anchor_current >= anchor_target);
     int next_idx;
     if (is_last_set) {
-      next_idx = giant_anchor + 3;
+      next_idx = find_next_incomplete_skip(s_app.state.curr_ex_idx);
     } else {
       next_idx = giant_anchor + ((giant_pos + 1) % 3);
     }
-    if (next_idx < s_app.state.total_exercises) {
+    if (next_idx >= 0) {
       snprintf(next_buf, sizeof(next_buf), "NEXT: %s", s_app.state.exercises[next_idx].name);
     } else {
       snprintf(next_buf, sizeof(next_buf), "NEXT: FINISH!");
     }
+  } else if (is_first_half) {
+    snprintf(next_buf, sizeof(next_buf), "NEXT: %s", s_app.state.exercises[s_app.state.curr_ex_idx + 1].name);
   } else if (is_second_half && ex->current_set < ex->target_sets) {
     snprintf(next_buf, sizeof(next_buf), "NEXT: %s", s_app.state.exercises[s_app.state.curr_ex_idx - 1].name);
-  } else if (s_app.state.curr_ex_idx + 1 < s_app.state.total_exercises) {
-    snprintf(next_buf, sizeof(next_buf), "NEXT: %s", s_app.state.exercises[s_app.state.curr_ex_idx + 1].name);
   } else {
-    snprintf(next_buf, sizeof(next_buf), "NEXT: FINISH!");
+    // Normal exercise (mid or last set), or superset second half on its last
+    // set: next is the earliest exercise still incomplete, ignoring the current
+    // one (which is still being finished, or about to be completed).
+    int next_idx = find_next_incomplete_skip(s_app.state.curr_ex_idx);
+    if (next_idx >= 0) {
+      snprintf(next_buf, sizeof(next_buf), "NEXT: %s", s_app.state.exercises[next_idx].name);
+    } else {
+      snprintf(next_buf, sizeof(next_buf), "NEXT: FINISH!");
+    }
   }
   text_layer_set_text(s_app.ui.next_exercise_layer, next_buf);
 
