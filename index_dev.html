@@ -1054,7 +1054,7 @@ function buildConfigPayload(routineData) {
     const payload = {
         progressionMode: document.getElementById('progressionMode').value,
         weightIncrement: document.getElementById('weightIncrement').value,
-        updatedSync: syncedRoutinesDict
+        activeSyncNames: Object.keys(syncedRoutinesDict)
     };
     if (routineData) payload.routineData = routineData;
     const googleUrl = document.getElementById('googleUrlInput').value;
