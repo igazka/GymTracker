@@ -382,7 +382,6 @@ let shouldClearGoogle  = false;
 // the editor's routine is unchanged, so a mode-only change can be sent
 // without re-transmitting the whole (potentially oversized) routine.
 let syncedRoutinesDict = {};
-let selectedRoutineOriginalName = null;
 
 // ============================================================
 // STORAGE HELPERS  (mirrors index.js for consistency)
@@ -437,21 +436,11 @@ function getSavedRoutines()  { return Storage.getJSON('savedRoutines', []); }
 function getLastRoutine()    { return Storage.get('lastRoutine', ''); }
 function saveRoutineToStorage(name, exercises, progressionMode, weightIncrement) {
     let routines = getSavedRoutines();
-
-    // Handle renaming: remove the old entry keyed under the original name
-    if (selectedRoutineOriginalName && selectedRoutineOriginalName !== name) {
-        routines = routines.filter(r => r.name !== selectedRoutineOriginalName);
-        delete syncedRoutinesDict[selectedRoutineOriginalName];
-    }
-
     const idx = routines.findIndex(r => r.name === name);
     const data = { name, exercises: exercises.map(migrateLegacyExercise), progressionMode, weightIncrement };
     if (idx >= 0) routines[idx] = data; else routines.push(data);
     Storage.setJSON('savedRoutines', routines);
     Storage.set('lastRoutine', name);
-
-    // Update the tracker to the new name after a successful save
-    selectedRoutineOriginalName = name;
 }
 
 // ============================================================
@@ -496,7 +485,6 @@ function loadSavedRoutines() {
 function selectRoutine() {
     const name = document.getElementById('savedRoutineSelect').value;
     if (!name) {
-        selectedRoutineOriginalName = null;
         document.getElementById('routineName').value = '';
         document.getElementById('progressionMode').value = '-1';
         document.getElementById('weightIncrement').value = '2';
@@ -508,7 +496,6 @@ function selectRoutine() {
     const routine = getSavedRoutines().find(r => r.name === name);
     if (!routine) return;
 
-    selectedRoutineOriginalName = name;
     document.getElementById('routineName').value        = routine.name;
     document.getElementById('progressionMode').value    = routine.progressionMode || '-1';
     document.getElementById('weightIncrement').value    = routine.weightIncrement || '2';
@@ -526,10 +513,6 @@ function deleteRoutine() {
     Storage.setJSON('savedRoutines', routines);
     if (getLastRoutine() === name) Storage.remove('lastRoutine');
 
-    // Purge from the sync dictionary so it doesn't resurrect on next load
-    delete syncedRoutinesDict[name];
-
-    selectedRoutineOriginalName = null;
     document.getElementById('routineName').value     = '';
     document.getElementById('progressionMode').value = '-1';
     document.getElementById('weightIncrement').value = '2';
@@ -1053,8 +1036,7 @@ function buildConfigPayload(routineData) {
     // simply omitted here.
     const payload = {
         progressionMode: document.getElementById('progressionMode').value,
-        weightIncrement: document.getElementById('weightIncrement').value,
-        updatedSync: syncedRoutinesDict
+        weightIncrement: document.getElementById('weightIncrement').value
     };
     if (routineData) payload.routineData = routineData;
     const googleUrl = document.getElementById('googleUrlInput').value;
@@ -1192,8 +1174,6 @@ function addToBatch() {
 
     myRoutine = [];
     document.getElementById('routineName').value = '';
-    document.getElementById('savedRoutineSelect').value = '';
-    selectedRoutineOriginalName = null;
     renderRoutine();
     renderBatchUI();
     alert(`✅ '${name}' added to batch! (${batchRoutines.length}/${MAX_BATCH})`);
@@ -1261,8 +1241,6 @@ function importFromText() {
         if (data.n && Array.isArray(data.e)) {
             document.getElementById('routineName').value = data.n;
             myRoutine = data.e.map(ex => { if (ex.length===4) ex.push(0); return migrateLegacyExercise(ex); });
-            document.getElementById('savedRoutineSelect').value = '';
-            selectedRoutineOriginalName = null;
             renderRoutine();
             alert('✅ Routine imported successfully!');
             document.getElementById('routineTextArea').value = '';
