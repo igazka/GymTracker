@@ -1565,6 +1565,14 @@ window.addEventListener('load', () => {
             }
         }
 
+        // Voice-added exercises are appended by the watch at the end of the
+        // routine, so any sync entries beyond the local copy's length are
+        // new exercises and must be adopted rather than dropped.
+        for (let i = mergedExercises.length; i < syncExercises.length; i++) {
+            mergedExercises.push(migrateLegacyExercise(syncExercises[i]));
+            merged = true;
+        }
+
         if (merged) {
             myRoutine = mergedExercises;
             renderRoutine();
