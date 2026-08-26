@@ -4,7 +4,7 @@
 // CONFIGURATION
 // ============================================================
 var CONFIG = {
-  isDevMode: false,
+  isDevMode: true,   // TEMP: beta always links to index_dev.html
   configUrlDev:  'https://oliverano95.github.io/GymTracker/index_dev.html',
   configUrlProd: 'https://oliverano95.github.io/GymTracker/',
   maxHistory: 15
@@ -339,10 +339,15 @@ Pebble.addEventListener('appmessage', function(e) {
 
     var nameMatch = spokenText.match(/^(.*?)\s*\d+\s*sets?/);
     if (nameMatch && nameMatch[1]) {
-      exerciseName = nameMatch[1].trim();
+      exerciseName = nameMatch[1];
     } else {
-      exerciseName = spokenText.substring(0, 20).trim();
+      exerciseName = spokenText.substring(0, 20);
     }
+
+    // Strip trailing punctuation the dictation service inserts after the
+    // exercise name (e.g. "bicep curls, 3 sets of 10" -> "bicep curls").
+    exerciseName = exerciseName.replace(/[\s,.;:!?]+$/g, '').trim();
+    if (!exerciseName) exerciseName = 'Unknown Exercise';
 
     // Capitalise first letter of each word
     exerciseName = exerciseName.replace(/\b\w/g, function(l) { return l.toUpperCase(); });
