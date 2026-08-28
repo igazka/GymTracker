@@ -4,7 +4,7 @@ const path = require('path');
 
 module.exports = defineConfig({
   testDir: '.',
-  testMatch: ['test-issue-46.js', 'test-e2e.js', 'test-csv-export.js'],
+  testMatch: ['test-config-page.js', 'emulator.js'],
   timeout: 60_000,
   expect: { timeout: 5_000 },
   fullyParallel: false,
@@ -12,7 +12,7 @@ module.exports = defineConfig({
   reporter: 'list',
   use: {
     headless: true,
-    viewport: { width: 1280, height: 720 },
+    viewport: { width: 400, height: 800 },
     actionTimeout: 5_000,
     ignoreHTTPSErrors: true,
   },
