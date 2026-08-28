@@ -6,10 +6,10 @@ Prerequisites for running GymTracker's automated tests.
 
 | Layer | What it tests | Needs Pebble SDK? | Needs emulator? |
 |-------|--------------|-------------------|-----------------|
-| `demo.js` | Config page UI, localStorage, JS functions | No | No |
+| `test-config-page.js` | Config page UI, localStorage, JS functions | No | No |
 | `emulator.js` | C code, AppMessage, full stack on emulator | Yes | Yes |
 
-## Layer 1: Config Page Tests (demo.js)
+## Layer 1: Config Page Tests (test-config-page.js)
 
 ### Requirements
 
@@ -26,7 +26,7 @@ npm install
 ### Verify
 
 ```bash
-npx playwright test demo.js
+npx playwright test test-config-page.js
 # Should print: 7 passed
 ```
 
@@ -105,7 +105,7 @@ cd tests/
 npm install
 
 # 2. Run config page tests (no SDK needed)
-npx playwright test demo.js
+npx playwright test test-config-page.js
 
 # 3. Install Pebble SDK (if not already)
 pip install pebble-tool

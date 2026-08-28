@@ -41,11 +41,12 @@ Opens the image automatically (disable with `--no-open`).
 ### Send AppMessage (simulate phone → watch)
 
 ```bash
+# Key 0 = ROUTINE_DATA (first entry in package.json appKeys array)
 pebble send-app-message --emulator basalt \
-  --string ROUTINE_DATA="Push Day|-1|2|Bench Press|3|10|60|0|-|OHP|3|8|50|0|-"
+  --string 0="Push Day|-1|2|Bench Press|3|10|60|0|-|OHP|3|8|50|0|-"
 ```
 
-This sends a message to the watch's `inbox_received_callback` in `main.c`. The key names must match `appKeys` in `package.json`.
+This sends a message to the watch's `inbox_received_callback` in `main.c`. Keys are numeric indices matching the order in `package.json` `appKeys`:
 
 ### Emulator Controls
 
@@ -74,9 +75,9 @@ pebble install --emulator basalt
 # 3. Watch logs
 pebble logs --emulator basalt &
 
-# 4. Send test data
+# 4. Send test data (key 0 = ROUTINE_DATA)
 pebble send-app-message --emulator basalt \
-  --string ROUTINE_DATA="Test|-1|2|Squat|4|8|100|0|-"
+  --string 0="Test|-1|2|Squat|4|8|100|0|-"
 
 # 5. Take screenshot
 pebble screenshot --emulator basalt test.png
@@ -103,16 +104,16 @@ pebble kill --emulator basalt
 
 ## GymTracker Message Keys
 
-From `package.json`:
+From `package.json` (appKeys array — index = key number for `send-app-message`):
 
-| Key | Direction | Purpose |
-|-----|-----------|---------|
-| `ROUTINE_DATA` | Phone → Watch | Send routine string (name, exercises, progression) |
-| `WORKOUT_SUMMARY` | Watch → Phone | Workout completion data |
-| `PROGRESSION_MODE` | Phone → Watch | Progression mode setting |
-| `WEIGHT_INCREMENT` | Phone → Watch | Weight increment setting |
-| `VOICE_ADD_EXERCISE` | Watch → Phone | Voice-dictated exercise |
-| `NEW_EXERCISE_DATA` | Watch → Phone | New exercise from user |
+| Index | Key | Direction | Purpose |
+|-------|-----|-----------|---------|
+| 0 | `ROUTINE_DATA` | Phone → Watch | Send routine string (name, exercises, progression) |
+| 1 | `WORKOUT_SUMMARY` | Watch → Phone | Workout completion data |
+| 2 | `PROGRESSION_MODE` | Phone → Watch | Progression mode setting |
+| 3 | `WEIGHT_INCREMENT` | Phone → Watch | Weight increment setting |
+| 4 | `VOICE_ADD_EXERCISE` | Watch → Phone | Voice-dictated exercise |
+| 5 | `NEW_EXERCISE_DATA` | Watch → Phone | New exercise from user |
 
 ## Testing with QEMU + pypkjs (full stack)
 
