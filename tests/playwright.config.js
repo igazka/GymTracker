@@ -3,7 +3,7 @@ const { defineConfig } = require('@playwright/test');
 
 module.exports = defineConfig({
   testDir: '.',
-  testMatch: ['test-chunked-transfer.js', 'test-pkjs-chunking.js', 'test-beta-bugfix.js', 'test-c-parser.js', 'test-issue-46.js'],
+  testMatch: ['test-chunked-transfer.js', 'test-pkjs-chunking.js', 'test-beta-bugfix.js', 'test-c-parser.js', 'test-issue-46.js', 'test-csv-export.js'],
   timeout: 60_000,
   expect: { timeout: 5_000 },
   fullyParallel: false,
