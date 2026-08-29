@@ -1127,8 +1127,27 @@ function sendToPebble(configData) {
     window.location.href = returnTo + encoded;
 }
 
-function sendRawToPebble(syncString) {
+function sendRawToPebble(syncString, deletions, modifiedRoutines) {
+    _hasNavigated = true;
     const returnTo = getQueryParam('return_to', 'pebblejs://close#');
+
+    // When there are pending deletions (or modifications), send as JSON so
+    // pkjs processes deletedKeys via the webviewclosed JSON path
+    // (handleRawSyncString does not handle tombstones). The raw sync string
+    // goes in routineData so pkjs still routes it through handleRawSyncString
+    // for chunked transfer.
+    if (deletions && deletions.length > 0) {
+        const payload = {
+            deletedKeys: deletions,
+            routineData: syncString
+        };
+        if (modifiedRoutines) payload.updatedSync = modifiedRoutines;
+        const encoded = encodeURIComponent(JSON.stringify(payload));
+        console.log('sendRawToPebble: sending JSON with deletions (' + encoded.length + ' chars)');
+        window.location.href = returnTo + encoded;
+        return;
+    }
+
     const encoded  = encodeURIComponent(syncString);
     console.log('sendRawToPebble: encoded.length=' + encoded.length + ' (routines are split into chunks by pkjs when needed)');
     if (encoded.length > MAX_CONFIG_RESPONSE) {
@@ -1233,23 +1252,24 @@ function exportRoutinesToCSV() {
         return;
     }
 
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', googleUrl, true);
-    xhr.setRequestHeader('Content-Type', 'application/json');
-    xhr.onload = function() {
-        if (xhr.status === 200) {
-            alert('Routines exported successfully!');
-        } else {
-            alert('Export failed: ' + xhr.status);
-        }
-    };
-    xhr.onerror = function() {
+    fetch(googleUrl, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: {
+            'Content-Type': 'text/plain;charset=utf-8'
+        },
+        body: JSON.stringify({
+            token: googlePwd,
+            routineDefinitions: definitions
+        })
+    })
+    .then(() => {
+        alert('Routines exported successfully!');
+    })
+    .catch((error) => {
+        console.error('Routine Export Error:', error);
         alert('Network error. Check the URL.');
-    };
-    xhr.send(JSON.stringify({
-        token: googlePwd,
-        routineDefinitions: definitions
-    }));
+    });
 }
 
 // ============================================================
@@ -1304,7 +1324,8 @@ function saveAndSendSingle() {
     // double-navigation). clear flags are rare, deliberate actions handled
     // by their own buttons; if a routine is also pending, the routine wins.
     if (routineStr) {
-        sendRawToPebble(routineStr);
+        sendRawToPebble(routineStr, deletedKeys,
+            Object.keys(modifiedRoutines).length > 0 ? modifiedRoutines : null);
     } else if (Object.keys(payload).length > 0) {
         sendToPebble(payload);
     }
@@ -1374,7 +1395,8 @@ function sendBatchToPebble() {
         `Any routines already on the watch that are not in this batch will be removed.`;
     if (!window.confirm(confirmMsg)) return;
     const finalStr = 'BATCH~' + batchRoutines.map(r => r.dataStr).join('~');
-    sendRawToPebble(finalStr);
+    sendRawToPebble(finalStr, deletedKeys,
+        Object.keys(modifiedRoutines).length > 0 ? modifiedRoutines : null);
 }
 
 // ============================================================
@@ -1408,6 +1430,24 @@ function importFromText() {
     if (!raw) return;
     try {
         const data = JSON.parse(raw);
+
+        // Bulk import: array of routines
+        if (Array.isArray(data)) {
+            let count = 0;
+            data.forEach(item => {
+                if (item.n && Array.isArray(item.e)) {
+                    const exercises = item.e.map(ex => { if (ex.length===4) ex.push(0); return migrateLegacyExercise(ex); });
+                    saveRoutineToStorage(item.n, exercises, '0', '2', null);
+                    count++;
+                }
+            });
+            loadSavedRoutines();
+            alert('✅ ' + count + ' routine(s) imported successfully!');
+            document.getElementById('routineTextArea').value = '';
+            return;
+        }
+
+        // Single routine import (original behaviour)
         if (data.n && Array.isArray(data.e)) {
             document.getElementById('routineName').value = data.n;
             myRoutine = data.e.map(ex => { if (ex.length===4) ex.push(0); return migrateLegacyExercise(ex); });
@@ -1761,9 +1801,14 @@ window.addEventListener('load', () => {
 // This ensures deletedKeys reach the watch-side persistent tombstone, so
 // routines deleted in the config page don't resurrect when the webview is
 // cleared and pkjs re-seeds synced_routines on next config open.
-window.addEventListener('beforeunload', () => {
+//
+// Both beforeunload AND pagehide are used because Android's Pebble companion
+// app may kill the WebView without firing beforeunload; pagehide is more
+// reliable in that case.
+function _sendDeletionPayload() {
     if (_hasNavigated) return; // already sent via Save & Send
     if (deletedKeys.length === 0 && Object.keys(modifiedRoutines).length === 0) return;
+    _hasNavigated = true; // prevent double-send across both events
 
     const payload = {};
     if (deletedKeys.length > 0) payload.deletedKeys = deletedKeys;
@@ -1772,7 +1817,9 @@ window.addEventListener('beforeunload', () => {
     const returnTo = getQueryParam('return_to', 'pebblejs://close#');
     const encoded  = encodeURIComponent(JSON.stringify(payload));
     window.location.replace(returnTo + encoded);
-});
+}
+window.addEventListener('beforeunload', _sendDeletionPayload);
+window.addEventListener('pagehide', _sendDeletionPayload);
 </script>
 </body>
 </html>

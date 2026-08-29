@@ -463,12 +463,14 @@ test.describe('Layer 2.5b — Routine creation and import', () => {
     await page.click('button:has-text("Import")');
     await page.waitForTimeout(500);
 
-    // Verify the routine name changed (selection remains — import doesn't clear it on main)
+    // Verify the routine name changed
     const afterImport = await page.evaluate(() => document.getElementById('routineName').value);
     expect(afterImport).toBe('New Routine');
 
+    // Imported routine is a fresh routine (not a rename of the previously selected one),
+    // so the saved-routine selection is cleared (tombstone-aware import).
     const selectValue = await page.evaluate(() => document.getElementById('savedRoutineSelect').value);
-    expect(selectValue).toBe('A');
+    expect(selectValue).toBe('');
   });
 
   test('Test 23: Import invalid JSON shows error', async ({ page }) => {
