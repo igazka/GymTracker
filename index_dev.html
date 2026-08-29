@@ -159,6 +159,7 @@
                 <option value="">-- New Routine --</option>
             </select>
             <button type="button" class="small-btn delete-btn" onclick="deleteRoutine()" style="margin:0; white-space:nowrap;">Delete</button>
+            <button type="button" class="small-btn delete-btn" onclick="deleteAllRoutines()" style="margin:0; white-space:nowrap;">Delete All</button>
         </div>
     </div>
 
@@ -314,6 +315,7 @@
 <!-- ════════════ GLOBAL ACTION BUTTONS ════════════ -->
 <div id="global-actions" style="margin-bottom:40px;">
     <button id="btn-add-batch"    class="batch-btn" onclick="addToBatch()">📦 + Add Current Routine to Batch</button>
+    <button id="btn-add-all-batch" class="batch-btn" onclick="addAllToBatch()" style="margin-top:6px;">📦 + Add All Saved Routines to Batch</button>
     <button id="btn-send-single"  style="padding:15px; font-size:18px; width:100%; box-shadow:0 4px 6px rgba(0,0,0,.2);" onclick="saveAndSendSingle()">Save &amp; Send Single Routine to Watch</button>
     <button id="btn-send-google"  style="display:none; padding:15px; font-size:18px; width:100%; box-shadow:0 4px 6px rgba(0,0,0,.2); background:var(--green);" onclick="saveAndSendSingle()">☁️ Save Google Settings to Watch</button>
     <p style="font-size:12px; color:gray; margin:8px 0 0;">Sending transfers data to the watch, so this page will close automatically — that's expected. Reopen it to edit more.</p>
@@ -544,7 +546,7 @@ function selectRoutine() {
 
 function deleteRoutine() {
     const name = document.getElementById('savedRoutineSelect').value;
-    if (!name || !confirm(`Delete '${name}' from saved routines?`)) return;
+    if (!name || !confirm(`Delete '${name}'?\n\nSettings will close to save the change.`)) return;
 
     let routines = getSavedRoutines().filter(r => r.name !== name);
     Storage.setJSON('savedRoutines', routines);
@@ -556,16 +558,26 @@ function deleteRoutine() {
     if (!deletedKeys.includes(name)) {
         deletedKeys.push(name);
     }
-    Storage.setJSON('deletedSyncKeys', deletedKeys);
 
-    selectedRoutineOriginalName = null;
-    document.getElementById('routineName').value     = '';
-    document.getElementById('progressionMode').value = '-1';
-    document.getElementById('weightIncrement').value = '2';
-    myRoutine = [];
-    renderRoutine();
-    updateProgressionUI();
-    loadSavedRoutines();
+    // Immediately send deletion to pkjs — beforeunload/pagehide don't fire
+    // reliably on the Pebble companion app's WebView, so we can't wait.
+    sendToPebble({ deletedKeys: deletedKeys });
+}
+
+function deleteAllRoutines() {
+    const saved = getSavedRoutines();
+    if (saved.length === 0) return alert('No routines to delete.');
+    if (!confirm(`Delete ALL ${saved.length} routines?\n\nSettings will close to save the change.`)) return;
+
+    // Mark every synced routine as deleted
+    for (const name of Object.keys(syncedRoutinesDict)) {
+        if (!deletedKeys.includes(name)) deletedKeys.push(name);
+    }
+
+    Storage.setJSON('savedRoutines', []);
+    Storage.remove('lastRoutine');
+
+    sendToPebble({ deletedKeys: deletedKeys });
 }
 
 // ============================================================
@@ -1379,6 +1391,30 @@ function addToBatch() {
     alert(`✅ '${name}' added to batch! (${batchRoutines.length}/${MAX_BATCH})`);
 }
 
+function addAllToBatch() {
+    const saved = getSavedRoutines();
+    if (saved.length === 0) return alert('No saved routines to add.');
+    const remaining = MAX_BATCH - batchRoutines.length;
+    if (remaining <= 0) return alert(`Batch is full! Max ${MAX_BATCH} routines.`);
+
+    let added = 0;
+    for (const routine of saved) {
+        if (batchRoutines.length >= MAX_BATCH) break;
+        // Skip corrupt/stale entries (empty name, no exercises) so they don't
+        // propagate a phantom routine (e.g. "2") to the watch.
+        if (!routine.name || !Array.isArray(routine.exercises) || routine.exercises.length === 0) continue;
+        if (batchRoutines.some(b => b.name === routine.name)) continue; // skip dupes
+        const dataStr = serialiseRoutineForSync(routine.name, routine.exercises,
+            routine.progressionMode || '-1', routine.weightIncrement || '2');
+        if (dataStr.length > MAX_ROUTINE_LEN) continue; // skip oversized
+        batchRoutines.push({ name: routine.name, dataStr });
+        added++;
+    }
+    renderBatchUI();
+    if (added === 0) return alert('No new routines could be added (all already in batch or too long).');
+    alert(`✅ ${added} routine(s) added to batch! (${batchRoutines.length}/${MAX_BATCH})`);
+}
+
 function renderBatchUI() {
     document.getElementById('batchCount').innerText = `${batchRoutines.length} / ${MAX_BATCH} Routines Prepared`;
     const listDiv = document.getElementById('batchList');
@@ -1448,16 +1484,24 @@ function importFromText() {
         // Bulk import: array of routines
         if (Array.isArray(data)) {
             let count = 0;
+            const importedSyncParts = [];
             data.forEach(item => {
                 if (item.n && Array.isArray(item.e)) {
                     const exercises = item.e.map(ex => { if (ex.length===4) ex.push(0); return migrateLegacyExercise(ex); });
                     saveRoutineToStorage(item.n, exercises, '0', '2', null);
+                    importedSyncParts.push(serialiseRoutineForSync(item.n, exercises, '0', '2'));
                     count++;
                 }
             });
             loadSavedRoutines();
-            alert('✅ ' + count + ' routine(s) imported successfully!');
+            if (count === 0) return alert('⚠️ No valid routines found.');
             document.getElementById('routineTextArea').value = '';
+
+            // Immediately send all imported routines to pkjs so they persist.
+            // Settings will close — reopen to continue.
+            if (!confirm(`✅ ${count} routine(s) imported!\n\nSettings will close to save them.`)) return;
+            const batchStr = 'BATCH~' + importedSyncParts.join('~');
+            sendRawToPebble(batchStr);
             return;
         }
 
