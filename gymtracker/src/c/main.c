@@ -5,7 +5,8 @@
 // ========================================================================= //
 #define MAX_EXERCISES 15
 #define MAX_SLOTS 7
-#define EXPORT_BUF_SIZE 1024
+#define EXPORT_BUF_SIZE 2048
+#define MAX_HR_SERIES 180
 
 #define STORAGE_KEY_BASE   100
 #define SETTINGS_KEY_BASE  200
@@ -80,6 +81,12 @@ typedef struct {
   int  actual_reps[10];
   bool dirty;
 } Exercise;
+
+// One sample in the session HR time-series (elapsed seconds + BPM).
+typedef struct {
+  uint16_t elapsed_sec;
+  uint8_t  bpm;
+} HRSample;
 
 typedef struct {
   int set_rest_sec;
@@ -247,6 +254,41 @@ static GymTrackerApp s_app = {
 };
 
 static char s_shared_text_buffer[256];
+
+// ========================================================================= //
+// Per-set HR (peak/avg during each set's active window) + HR time-series.  //
+// Kept as file-scope statics (not part of the persisted Exercise/State      //
+// structs) so adding HR data does not require a persistence migration.      //
+// ========================================================================= //
+static uint16_t s_set_peak_hr[MAX_EXERCISES][10];
+static uint32_t s_set_hr_sum[MAX_EXERCISES][10];
+static uint16_t s_set_hr_count[MAX_EXERCISES][10];
+static HRSample  s_hr_series[MAX_HR_SERIES];
+static int       s_hr_series_count = 0;
+
+// Second outbound message buffer + sequencing flag for the two-message sync.
+static char s_sync_out_buf[EXPORT_BUF_SIZE];
+static bool s_sync_sent_summary = false;
+
+static void reset_set_hr(int ex_idx, int set_idx) {
+  if (ex_idx < 0 || ex_idx >= MAX_EXERCISES) return;
+  if (set_idx < 0 || set_idx >= 10) return;
+  s_set_peak_hr[ex_idx][set_idx] = 0;
+  s_set_hr_sum[ex_idx][set_idx]   = 0;
+  s_set_hr_count[ex_idx][set_idx] = 0;
+}
+
+static void reset_all_set_hr(void) {
+  for (int e = 0; e < MAX_EXERCISES; e++) {
+    for (int s = 0; s < 10; s++) {
+      s_set_peak_hr[e][s] = 0;
+      s_set_hr_sum[e][s]   = 0;
+      s_set_hr_count[e][s] = 0;
+    }
+  }
+  s_hr_series_count = 0;
+}
+
 static const char *s_sensation_titles[] = {"Unstoppable", "Strong", "Normal", "Exhausted", "Struggled"};
 static const char *s_sensation_subs[]   = {"Felt amazing!", "Hit targets well", "Got work done", "Completely drained", "Felt weak/off"};
 static const char *s_variations[]       = {
@@ -793,6 +835,7 @@ static void perform_true_skip(void) {
       Exercise *member = &s_app.state.exercises[i];
       for (int j = member->current_set - 1; j < member->target_sets; j++) {
         member->actual_reps[j] = 0; member->actual_weight[j] = 0;
+        reset_set_hr(i, j);
       }
       member->current_set = member->target_sets;
       s_app.state.completed_sets[i] = member->target_sets;
@@ -818,6 +861,7 @@ static void perform_true_skip(void) {
 
   for (int i = ex->current_set - 1; i < ex->target_sets; i++) {
     ex->actual_reps[i] = 0; ex->actual_weight[i] = 0;
+    reset_set_hr(s_app.state.curr_ex_idx, i);
   }
   ex->current_set = ex->target_sets;
   s_app.state.completed_sets[s_app.state.curr_ex_idx] = ex->target_sets;
@@ -826,6 +870,7 @@ static void perform_true_skip(void) {
     Exercise *next_ex = &s_app.state.exercises[s_app.state.curr_ex_idx + 1];
     for (int i = next_ex->current_set - 1; i < next_ex->target_sets; i++) {
       next_ex->actual_reps[i] = 0; next_ex->actual_weight[i] = 0;
+      reset_set_hr(s_app.state.curr_ex_idx + 1, i);
     }
     next_ex->current_set = next_ex->target_sets;
     s_app.state.completed_sets[s_app.state.curr_ex_idx + 1] = next_ex->target_sets;
@@ -834,6 +879,7 @@ static void perform_true_skip(void) {
     Exercise *prev_ex = &s_app.state.exercises[s_app.state.curr_ex_idx - 1];
     for (int i = prev_ex->current_set - 1; i < prev_ex->target_sets; i++) {
       prev_ex->actual_reps[i] = 0; prev_ex->actual_weight[i] = 0;
+      reset_set_hr(s_app.state.curr_ex_idx - 1, i);
     }
     prev_ex->current_set = prev_ex->target_sets;
     s_app.state.completed_sets[s_app.state.curr_ex_idx - 1] = prev_ex->target_sets;
@@ -1144,6 +1190,21 @@ static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
     current_hr = health_service_peek_current_value(HealthMetricHeartRateBPM);
 #endif
 
+  // Per-set HR: accumulate peak/avg only while actively performing a set
+  // (not paused, not resting). current_set points at the set in progress.
+  if (!s_app.state.is_paused && !s_app.state.is_resting && current_hr > 0 &&
+      s_app.state.curr_ex_idx < s_app.state.total_exercises) {
+    Exercise *ex = &s_app.state.exercises[s_app.state.curr_ex_idx];
+    int set_idx = ex->current_set - 1;
+    if (set_idx >= 0 && set_idx < 10) {
+      uint16_t bpm = (uint16_t)current_hr;
+      if (bpm > s_set_peak_hr[s_app.state.curr_ex_idx][set_idx])
+        s_set_peak_hr[s_app.state.curr_ex_idx][set_idx] = bpm;
+      s_set_hr_sum[s_app.state.curr_ex_idx][set_idx]   += (uint32_t)current_hr;
+      s_set_hr_count[s_app.state.curr_ex_idx][set_idx]++;
+    }
+  }
+
   // user-configured interval (hr_sample_rate minutes).
   static int s_last_minute = -1;
   if (tick_time->tm_min != s_last_minute) {
@@ -1160,6 +1221,16 @@ static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
       if (current_hr > (HealthValue)s_app.state.peak_hr) s_app.state.peak_hr = (int)current_hr;
       s_app.state.total_hr += (int)current_hr;
       s_app.state.hr_samples++;
+
+      // Session time-series sample (dedupe by elapsed second so paused
+      // minutes with a frozen workout clock don't create duplicate stamps).
+      if (s_hr_series_count < MAX_HR_SERIES &&
+          (s_hr_series_count == 0 ||
+           s_hr_series[s_hr_series_count - 1].elapsed_sec != (uint16_t)s_app.state.workout_sec)) {
+        s_hr_series[s_hr_series_count].elapsed_sec = (uint16_t)s_app.state.workout_sec;
+        s_hr_series[s_hr_series_count].bpm = (uint8_t)current_hr;
+        s_hr_series_count++;
+      }
     }
   }
 
@@ -2035,16 +2106,13 @@ static void summary_window_load(Window *window) {
   char date_buf[32] = "Unknown Date";
   if (tick_time) strftime(date_buf, sizeof(date_buf), "%Y-%m-%d %H:%M", tick_time);
 
-  int avg_hr = (s_app.state.hr_samples > 0) ? (s_app.state.total_hr / s_app.state.hr_samples) : 0;
-
   // Use static buffers for export/sync to avoid heap pressure.        FIX #1
   static char export_buf[EXPORT_BUF_SIZE];
-  static char sync_buf[EXPORT_BUF_SIZE];
 
   int limit   = EXPORT_BUF_SIZE;
-  int written = snprintf(export_buf, limit, "%s|%s|%d|%d|%d|%d|%d|%d",
+  int written = snprintf(export_buf, limit, "%s|%s|%d|%d|%d|%d",
     s_app.state.routine_name, date_buf, s_app.state.workout_sec,
-    s_app.state.sensation, accuracy, density, s_app.state.peak_hr, avg_hr);
+    s_app.state.sensation, accuracy, density);
   int offset = (written > 0 && written < limit) ? written : limit - 1;
 
   for (int i = 0; i < s_app.state.total_exercises; i++) {
@@ -2060,14 +2128,34 @@ static void summary_window_load(Window *window) {
 
     for (int j = 0; j < s_app.state.exercises[i].target_sets; j++) {
       if (offset >= limit - 1) break;
-      written = snprintf(export_buf + offset, limit - offset, "|%d|%d",
+      int set_avg = (s_set_hr_count[i][j] > 0)
+                    ? (int)(s_set_hr_sum[i][j] / s_set_hr_count[i][j]) : 0;
+      written = snprintf(export_buf + offset, limit - offset, "|%d|%d|%d|%d",
                          s_app.state.exercises[i].actual_reps[j],
-                         s_app.state.exercises[i].actual_weight[j]);
+                         s_app.state.exercises[i].actual_weight[j],
+                         (int)s_set_peak_hr[i][j],
+                         set_avg);
       offset += (written > 0 && written < limit - offset) ? written : limit - offset - 1;
     }
   }
 
-  int s_written = snprintf(sync_buf, limit, "%s|%d|%d",
+  // Append the session HR time-series (timestamped samples at the configured
+  // interval) as a reserved "@HR" section so downstream parsers can split it
+  // from the per-set data.
+  if (offset < limit - 1) {
+    written = snprintf(export_buf + offset, limit - offset, "|@HR|");
+    offset += (written > 0 && written < limit - offset) ? written : limit - offset - 1;
+  }
+  for (int k = 0; k < s_hr_series_count; k++) {
+    if (offset >= limit - 1) break;
+    if (k > 0 && offset < limit - 1) export_buf[offset++] = ';';
+    written = snprintf(export_buf + offset, limit - offset, "%u,%u",
+                       (unsigned)s_hr_series[k].elapsed_sec,
+                       (unsigned)s_hr_series[k].bpm);
+    offset += (written > 0 && written < limit - offset) ? written : limit - offset - 1;
+  }
+
+  int s_written = snprintf(s_sync_out_buf, limit, "%s|%d|%d",
     s_app.state.routine_name, s_app.settings.progression_mode, s_app.settings.weight_increment);
   int s_off = (s_written > 0 && s_written < limit) ? s_written : limit - 1;
 
@@ -2082,7 +2170,7 @@ static void summary_window_load(Window *window) {
       s_app.state.exercises[i].target_sets = base_sets / 2;
 
     if (s_off < limit - 1) {
-      s_written = snprintf(sync_buf + s_off, limit - s_off, "|%s|%d|%d|%d|%d|%s",
+      s_written = snprintf(s_sync_out_buf + s_off, limit - s_off, "|%s|%d|%d|%d|%d|%s",
         s_app.state.exercises[i].name,
         s_app.state.exercises[i].target_sets,
         s_app.state.exercises[i].target_reps,
@@ -2095,15 +2183,33 @@ static void summary_window_load(Window *window) {
     s_app.state.exercises[i].target_sets = base_sets;
   }
 
+  // Split the two payloads into separate outbound messages so the workout
+  // summary (now carrying per-set HR + the time-series) gets its own buffer.
   DictionaryIterator *iter;
   if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
     dict_write_cstring(iter, MESSAGE_KEY_WORKOUT_SUMMARY, export_buf);
-    dict_write_cstring(iter, MESSAGE_KEY_ROUTINE_DATA,    sync_buf);
     app_message_outbox_send();
+    s_sync_sent_summary = false;  // ROUTINE_DATA is sent from outbox_sent_callback
     text_layer_set_text(s_app.ui.sum_info_layer, celebration_buf);
   } else {
     text_layer_set_text(s_app.ui.sum_info_layer, "Sync Failed.\nCheck Bluetooth.");
   }
+}
+
+static void outbox_sent_callback(DictionaryIterator *iterator, void *context) {
+  // First message (WORKOUT_SUMMARY) is out — follow up with ROUTINE_DATA.
+  if (!s_sync_sent_summary) {
+    s_sync_sent_summary = true;
+    DictionaryIterator *iter2;
+    if (app_message_outbox_begin(&iter2) == APP_MSG_OK) {
+      dict_write_cstring(iter2, MESSAGE_KEY_ROUTINE_DATA, s_sync_out_buf);
+      app_message_outbox_send();
+    }
+  }
+}
+
+static void outbox_failed_callback(DictionaryIterator *iterator, AppMessageResult reason, void *context) {
+  text_layer_set_text(s_app.ui.sum_info_layer, "Sync Failed.\nCheck Bluetooth.");
 }
 
 static void summary_window_unload(Window *window) {
@@ -3677,6 +3783,8 @@ static void start_workout_from_slot(int slot_idx) {
   s_app.state.total_hr    = 0;
   s_app.state.hr_samples  = 0;
 
+  reset_all_set_hr();
+
   init_temp_values(&s_app.state.exercises[0]);
 
   s_app.state.is_resting              = false;
@@ -3712,6 +3820,10 @@ static void menu_select_callback(MenuLayer *ml, MenuIndex *cell_index, void *dat
 
       for (int j = 0; j < s_app.state.total_exercises; j++)
         persist_read_data(ACTIVE_EX_BASE + j, &s_app.state.exercises[j], sizeof(Exercise));
+
+      // Per-set HR and the session HR series are ephemeral (not persisted),
+      // so a resumed workout restarts them fresh.
+      reset_all_set_hr();
 
       // v1 resume: rebuild the jump-safe completion tracker using the same
       // watermark estimate the old get_completed_sets() relied on. Live play
@@ -4048,8 +4160,11 @@ static void init(void) {
   // They will be created the first time they are pushed, just like all other windows.
 
   app_message_register_inbox_received(inbox_received_callback);
-  // 2048 is plenty of room for our 1300-byte routines, freeing up over 12 KB of RAM!
-  app_message_open(2048, 1024);
+  app_message_register_outbox_sent(outbox_sent_callback);
+  app_message_register_outbox_failed(outbox_failed_callback);
+  // 2048 inbox for our 1300-byte routines; 2048 outbox for the workout summary
+  // (which now carries per-set HR + the HR time-series).
+  app_message_open(2048, 2048);
 }
 
 static void deinit(void) {

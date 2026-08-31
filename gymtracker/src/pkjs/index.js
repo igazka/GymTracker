@@ -70,7 +70,8 @@ function exportToGoogleSheets(rawData) {
 // ============================================================
 function saveWorkoutLocally(rawData) {
   // Validate payload size before storing to prevent localStorage bloat
-  if (!rawData || rawData.length > 4096) {
+  // (bumped to 8 KB: the summary now carries per-set HR + an HR time-series)
+  if (!rawData || rawData.length > 8192) {
     console.log('Workout payload missing or oversized, skipping local save.');
     return;
   }
