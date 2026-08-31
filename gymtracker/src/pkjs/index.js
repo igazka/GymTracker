@@ -154,6 +154,31 @@ function autoSyncRoutine(syncString, routineName, parsedRoutine) {
 // PEBBLE EVENT LISTENERS
 // ============================================================
 
+// Helper: get persistent watch-side tombstone list (survives webview clears).
+// This is the authoritative "deleted routines" list on the watch side,
+// separate from the config-page webview's deletedSyncKeys (which may be lost
+// on a cleared webview).
+function getDeletedRoutines() {
+  return Storage.getJSON('deleted_routines', []);
+}
+
+function addDeletedRoutine(name) {
+  var deleted = getDeletedRoutines();
+  if (deleted.indexOf(name) === -1) {
+    deleted.push(name);
+    Storage.setJSON('deleted_routines', deleted);
+  }
+}
+
+function removeDeletedRoutine(name) {
+  var deleted = getDeletedRoutines();
+  var idx = deleted.indexOf(name);
+  if (idx !== -1) {
+    deleted.splice(idx, 1);
+    Storage.setJSON('deleted_routines', deleted);
+  }
+}
+
 // 1. JS environment ready
 Pebble.addEventListener('ready', function() {
   console.log('PebbleKit JS ready.');
@@ -167,6 +192,29 @@ Pebble.addEventListener('showConfiguration', function() {
   var googlePwd      = Storage.get('googlePwd', '');
   var syncedRoutines = Storage.get('synced_routines', '{}');
   var historyArr     = Storage.getJSON('workoutHistory', []);
+  var deletedRoutines = getDeletedRoutines(); // watch-side persistent tombstone
+
+  // Filter out tombstoned names from synced_routines before passing to config page.
+  // This prevents the config page from re-seeding deleted routines when the
+  // webview has been cleared (deletedSyncKeys lost) while the watch still has
+  // them in synced_routines. The config page's ephemeral deletedSyncKeys and
+  // this persistent watch-side tombstone work together: whichever survives a
+  // webview clear determines the outcome.
+  if (deletedRoutines.length > 0) {
+    try {
+      var syncedObj = JSON.parse(syncedRoutines);
+      var filtered = {};
+      var keys = Object.keys(syncedObj);
+      for (var i = 0; i < keys.length; i++) {
+        if (deletedRoutines.indexOf(keys[i]) === -1) {
+          filtered[keys[i]] = syncedObj[keys[i]];
+        }
+      }
+      syncedRoutines = JSON.stringify(filtered);
+    } catch (e) {
+      console.log('Warning: failed to parse synced_routines for tombstone exclusion: ' + e);
+    }
+  }
 
   var SAFE_URL_LIMIT = 7000; // GitHub Pages rejects URLs over ~8KB
 
@@ -211,25 +259,38 @@ Pebble.addEventListener('showConfiguration', function() {
 Pebble.addEventListener('webviewclosed', function(e) {
   if (!e.response || e.response === 'CANCELLED' || e.response === '[]') return;
 
-  // Log the raw response length. The config response rides the
-  // pebblejs://close# URL, which the phone app silently truncates past a
-  // platform limit (observed: 252/279 chars deliver, 672 is dropped). The
-  // length logged here reveals the exact limit on first contact, so the
-  // MAX_CONFIG_RESPONSE cap in index.html can be tuned precisely.
-  console.log('webviewclosed: raw response length = ' + (e.response ? e.response.length : 0));
+  var responseLength = e.response ? e.response.length : 0;
+  console.log('webviewclosed: raw response length = ' + responseLength);
 
-  var configData;
+  // --- Raw sync string (new format, no JSON wrapper) ---
+  // The config page sends raw sync strings when the payload is routine-only.
+  // Format: "RoutineName|prog|inc|ex|sets|reps|weight|mod|cmt|..."
+  // Or compound: "BATCH~routine1~routine2~..."
+  var decoded;
   try {
-    configData = JSON.parse(decodeURIComponent(e.response));
+    decoded = decodeURIComponent(e.response);
   } catch (err) {
-    // FIX: guard against malformed JSON instead of crashing the JS runtime.
-    // A truncated response (over the platform URL limit) lands here: the
-    // settings save is silently lost. The length above is the diagnostic.
-    console.log('webviewclosed: failed to parse response (length=' + (e.response ? e.response.length : 0) + '): ' + err);
+    console.log('webviewclosed: failed to decode response: ' + err);
     return;
   }
 
-  // --- Credentials ---
+  if (decoded.charAt(0) !== '{') {
+    // Raw sync string — not JSON
+    console.log('webviewclosed: raw sync string detected (' + decoded.length + ' chars): ' + decoded.substring(0, 100));
+    handleRawSyncString(decoded);
+    return;
+  }
+
+  // --- Legacy JSON format (backward compat) ---
+  var configData;
+  try {
+    configData = JSON.parse(decoded);
+  } catch (err) {
+    console.log('webviewclosed: failed to parse JSON response (length=' + responseLength + '): ' + err);
+    return;
+  }
+
+  // Credentials
   if (configData.clearGoogle) {
     Storage.remove('googleUrl');
     Storage.remove('googlePwd');
@@ -243,19 +304,34 @@ Pebble.addEventListener('webviewclosed', function(e) {
     }
   }
 
-  // --- History ---
   if (configData.clearHistory) {
     Storage.setJSON('workoutHistory', []);
   }
 
   // --- Two-Way Sync routines ---
-  if (configData.updatedSync !== undefined) {
-    Storage.setJSON('synced_routines', configData.updatedSync);
+  var synced = Storage.getJSON('synced_routines', {});
+
+  // 1. Purge deleted keys from synced_routines AND add to persistent tombstone
+  //    so they survive a webview clear and aren't re-seeded on next config open.
+  if (Array.isArray(configData.deletedKeys)) {
+    configData.deletedKeys.forEach(function(key) {
+      delete synced[key];
+      addDeletedRoutine(key); // watch-side persistent tombstone
+    });
   }
+
+  // 2. Apply updated/renamed keys
+  if (configData.updatedSync) {
+    Object.keys(configData.updatedSync).forEach(function(key) {
+      synced[key] = configData.updatedSync[key];
+      removeDeletedRoutine(key); // re-creating clears tombstone
+    });
+  }
+
+  Storage.setJSON('synced_routines', synced);
 
   // --- Send data to watch ---
   var appMessageData = {};
-
   if (configData.routineData && configData.routineData !== '') {
     appMessageData['ROUTINE_DATA'] = configData.routineData;
   }
@@ -267,12 +343,110 @@ Pebble.addEventListener('webviewclosed', function(e) {
   }
 
   if (Object.keys(appMessageData).length > 0) {
-    Pebble.sendAppMessage(appMessageData,
-                          function()    { console.log('Data sent to watch successfully.'); },
-                          function(err) { console.log('Failed to send data to watch: ' + JSON.stringify(err)); }
-    );
+    sendOrChunk(appMessageData);
   }
 });
+
+// ============================================================
+// RAW SYNC STRING HANDLER
+// ============================================================
+function handleRawSyncString(decoded) {
+  // Compound batch: "BATCH~routine1~routine2~..."
+  if (decoded.indexOf('BATCH~') === 0) {
+    var batchStr = decoded.substring(6); // strip "BATCH~"
+    sendOrChunk({ 'ROUTINE_DATA': 'BATCH~' + batchStr });
+    return;
+  }
+
+  // Single routine sync string
+  var parsed = parseRoutineString(decoded);
+  if (!parsed) {
+    console.log('handleRawSyncString: failed to parse sync string');
+    return;
+  }
+
+  // Auto-sync routine to savedRoutines
+  autoSyncRoutine(decoded, parsed.name, parsed);
+
+  var appMessageData = {
+    'ROUTINE_DATA': decoded
+  };
+  if (parsed.progressionMode !== '-1') {
+    appMessageData['PROGRESSION_MODE'] = parseInt(parsed.progressionMode, 10);
+  }
+  if (parsed.weightIncrement !== '2') {
+    appMessageData['WEIGHT_INCREMENT'] = parseInt(parsed.weightIncrement, 10);
+  }
+
+  sendOrChunk(appMessageData);
+}
+
+// ============================================================
+// CHUNKED TRANSFER
+// Splits oversized payloads into multiple AppMessage sends.
+// The phone app's PebbleKit JS runtime handles ACK-based flow
+// control: sendAppMessage queues messages and delivers them
+// one at a time, waiting for each ACK before the next.
+// ============================================================
+var CHUNK_SIZE = 400; // safe margin under 512-char AppMessage limit
+
+function sendOrChunk(appMessageData) {
+  var routineData = appMessageData['ROUTINE_DATA'];
+  if (!routineData || routineData.length <= CHUNK_SIZE) {
+    // Fits in one message — send directly
+    Pebble.sendAppMessage(appMessageData,
+      function() { console.log('Data sent to watch successfully.'); },
+      function(err) { console.log('Failed to send data to watch: ' + JSON.stringify(err)); }
+    );
+    return;
+  }
+
+  // Too large — chunk it
+  console.log('Payload too large (' + routineData.length + ' chars), chunking...');
+  var chunks = [];
+  for (var i = 0; i < routineData.length; i += CHUNK_SIZE) {
+    chunks.push(routineData.substring(i, i + CHUNK_SIZE));
+  }
+
+  console.log('Split into ' + chunks.length + ' chunks');
+  sendChunksSequentially(chunks, 0, chunks.length, appMessageData['PROGRESSION_MODE'], appMessageData['WEIGHT_INCREMENT']);
+}
+
+function sendChunksSequentially(chunks, index, totalChunks, progressionMode, weightIncrement) {
+  if (index >= totalChunks) {
+    console.log('All ' + totalChunks + ' chunks sent successfully.');
+    return;
+  }
+
+  // Prepend chunk metadata: "N/T|data"
+  var chunkPayload = (index + 1) + '/' + totalChunks + '|' + chunks[index];
+
+  var chunkData = {
+    'CHUNK_TRANSFER': chunkPayload,
+    'PROGRESSION_MODE': progressionMode !== undefined ? progressionMode : -1,
+    'WEIGHT_INCREMENT': weightIncrement !== undefined ? weightIncrement : 2
+  };
+
+  Pebble.sendAppMessage(chunkData,
+    function() {
+      console.log('Chunk ' + (index + 1) + '/' + totalChunks + ' sent.');
+      sendChunksSequentially(chunks, index + 1, totalChunks, progressionMode, weightIncrement);
+    },
+    function(err) {
+      console.log('Chunk ' + (index + 1) + ' failed: ' + JSON.stringify(err));
+      // Retry once
+      Pebble.sendAppMessage(chunkData,
+        function() {
+          console.log('Chunk ' + (index + 1) + '/' + totalChunks + ' sent (retry).');
+          sendChunksSequentially(chunks, index + 1, totalChunks, progressionMode, weightIncrement);
+        },
+        function(err2) {
+          console.log('Chunk ' + (index + 1) + ' failed permanently: ' + JSON.stringify(err2));
+        }
+      );
+    }
+  );
+}
 
 // 4. Message received FROM the watch
 Pebble.addEventListener('appmessage', function(e) {

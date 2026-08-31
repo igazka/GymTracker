@@ -1,0 +1,13 @@
+{
+  "name": "gymtracker-tests",
+  "private": true,
+  "scripts": {
+    "test": "npx playwright test",
+    "test:tombstone": "npx playwright test test-issue-46.js",
+    "test:csv": "npx playwright test test-csv-export.js",
+    "test:debug": "npx playwright test --headed --debug"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.52.0"
+  }
+}
