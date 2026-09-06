@@ -28,3 +28,16 @@ When testing features on GitHub Pages that are on a non-main branch:
 - Go to **Settings** → **Pages** → Select branch from dropdown
 - This allows GitHub Pages to serve code from feature branches
 - Remember to switch back after testing
+
+## Long-Running Commands
+
+Never run a command that may exceed ~1 minute in the foreground. Run it as a
+background process that writes its logs to a logfile under `/tmp/opencode/`
+so it can be monitored or checked later:
+
+```bash
+nohup <command> > /tmp/opencode/<task-name>.log 2>&1 &
+```
+
+Monitor with `tail -f /tmp/opencode/<task-name>.log`, or read the log later if
+the task fails or you need to diagnose it.
