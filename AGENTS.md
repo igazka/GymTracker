@@ -29,6 +29,11 @@ When testing features on GitHub Pages that are on a non-main branch:
 - This allows GitHub Pages to serve code from feature branches
 - Remember to switch back after testing
 
+## Communication — No Three-Letter Abbreviations
+- Never use three-letter abbreviations in identifiers, comments, documentation, dashboard text, issue text, or conversation. Write full words: `temporary` not `tmp`, `configuration` not `cfg`, `message` not `msg`, `average` not `avg`, `heart rate` not `hr`, `movement counts` not `vmc`.
+- Leave untouched: programming language keywords and standard library names; names fixed by external contracts (software development kit fields, wire protocol keys, message keys, columns owned by another system); file paths and commands owned by other projects. Where such a name must stay, expand it on first use in prose.
+- Renaming a live database column additionally requires explicit migration handling plus matching updates in queries, dashboards, and documentation — never rename without all three.
+
 ## Long-Running Commands
 
 Never run a command that may exceed ~1 minute in the foreground. Run it as a
